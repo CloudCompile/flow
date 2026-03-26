@@ -1,0 +1,28 @@
+name: 'Flow'
+description: 'AI coding assistant powered by Pollinations. Mention @bot in any PR or issue comment to review, fix, implement features, or build entire codebases.'
+author: 'your-username'
+
+branding:
+  icon: 'cpu'
+  color: 'purple'
+
+inputs:
+  pollinations_api_key:
+    description: 'Your Pollinations API key from enter.pollinations.ai'
+    required: true
+  model:
+    description: 'Pollinations model to use (claude, openai-large, gemini, etc.)'
+    required: false
+    default: 'claude'
+  max_tokens:
+    description: 'Max tokens for AI response'
+    required: false
+    default: '32000'
+  github_token:
+    description: 'GitHub token for API access and committing changes'
+    required: true
+    default: ${{ github.token }}
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
