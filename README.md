@@ -1,6 +1,6 @@
 # Flow AI Bot
 
-An AI coding assistant GitHub Action powered by [Pollinations](https://pollinations.ai). Mention `@bot` in any PR or issue comment to review code, fix bugs, implement features, or build entire codebases from scratch.
+An AI coding assistant GitHub Action powered by [Pollinations](https://pollinations.ai). Mention `@flowai` in any PR or issue comment to review code, fix bugs, implement features, or build entire codebases from scratch.
 
 ## Usage
 
@@ -28,8 +28,8 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@bot')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@bot')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@flowai')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@flowai')) ||
       (github.event_name == 'issues' && startsWith(github.event.label.name, 'bot-')) ||
       (github.event_name == 'pull_request' && startsWith(github.event.label.name, 'bot-'))
 
@@ -50,11 +50,11 @@ Then add your Pollinations API key as a repository secret named `POLLINATIONS_AP
 ## Examples
 
 ```
-@bot review this PR for security issues
-@bot fix the failing tests in auth.test.ts
-@bot implement a rate limiter middleware
-@bot explain what this function does
-@bot build a full REST API for user authentication
+@flowai review this PR for security issues
+@flowai fix the failing tests in auth.test.ts
+@flowai implement a rate limiter middleware
+@flowai explain what this function does
+@flowai build a full REST API for user authentication
 ```
 
 You can also trigger the bot by adding labels to issues or PRs:
@@ -69,3 +69,16 @@ You can also trigger the bot by adding labels to issues or PRs:
 ## Inputs
 
 | Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `pollinations_api_key` | Yes | — | Your Pollinations API key |
+| `github_token` | Yes | `${{ github.token }}` | GitHub token for API access |
+| `model` | No | `glm` | Pollinations model to use |
+| `max_tokens` | No | `32000` | Max tokens for AI response |
+
+### Available models
+
+Any model supported by Pollinations works: `glm`, `claude`, `openai-large`, `gemini`, `deepseek`, and more. See the [Pollinations docs](https://gen.pollinations.ai/v1/models) for the full list.
+
+## License
+
+MIT
