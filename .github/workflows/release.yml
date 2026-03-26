@@ -17,7 +17,7 @@ jobs:
 
       - name: Build and bundle
         run: |
-          npm ci
+          npm install
           npm run package
 
       - name: Commit dist
@@ -27,6 +27,11 @@ jobs:
           git add dist/
           git diff --staged --quiet || git commit -m "chore: bundle dist for ${GITHUB_REF_NAME}"
           git push origin HEAD:main
+
+      - name: Move tag to include dist commit
+        run: |
+          git tag -f ${GITHUB_REF_NAME}
+          git push origin ${GITHUB_REF_NAME} --force
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

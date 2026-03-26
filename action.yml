@@ -11,7 +11,7 @@ inputs:
     description: 'Your Pollinations API key from enter.pollinations.ai'
     required: true
   model:
-    description: 'Pollinations model to use (claude, openai-large, gemini, etc.)'
+    description: 'Pollinations model to use (glm, claude, openai-large, gemini, etc.)'
     required: false
     default: 'glm'
   max_tokens:

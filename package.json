@@ -1,0 +1,23 @@
+{
+  "name": "flow",
+  "version": "1.0.0",
+  "description": "Flow — AI coding assistant GitHub Action powered by Pollinations",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "package": "tsc && ncc build dist/index.js -o dist/bundled --license licenses.txt && cp -r dist/bundled/* dist/ && rm -rf dist/bundled",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@actions/core": "^1.10.1",
+    "@actions/github": "^6.0.0",
+    "@octokit/rest": "^21.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@vercel/ncc": "^0.38.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  }
+}
