@@ -19,8 +19,8 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@bot')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@bot')) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@flowai')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@flowai')) ||
       (github.event_name == 'issues' && startsWith(github.event.label.name, 'bot-')) ||
       (github.event_name == 'pull_request' && startsWith(github.event.label.name, 'bot-'))
 
@@ -30,9 +30,9 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: CloudCompile/flow@v1
+      - uses: your-username/pollinations-bot@v1
         with:
           pollinations_api_key: ${{ secrets.POLLINATIONS_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          model: claude          # optional, default is claude
+          model: glm             # optional, default is glm
           max_tokens: 32000      # optional
