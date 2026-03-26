@@ -1,6 +1,6 @@
-name: 'Flow'
-description: 'AI coding assistant powered by Pollinations. Mention @bot in any PR or issue comment to review, fix, implement features, or build entire codebases.'
-author: 'your-username'
+name: 'FlowAI Bot'
+description: 'AI coding assistant via Pollinations. Mention @flowai in PRs or issues to review, fix, and build code.'
+author: 'CloudCompile'
 
 branding:
   icon: 'cpu'
@@ -13,7 +13,7 @@ inputs:
   model:
     description: 'Pollinations model to use (claude, openai-large, gemini, etc.)'
     required: false
-    default: 'claude'
+    default: 'glm'
   max_tokens:
     description: 'Max tokens for AI response'
     required: false
