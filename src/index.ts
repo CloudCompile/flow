@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import * as core from "@actions/core";
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -15,6 +15,29 @@ const OBJECT_FALLBACK_MESSAGE = "[unserializable object response]";
 const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
 const TRUNCATION_SUFFIX_LENGTH = TRUNCATION_SUFFIX.length;
 const REPO_ROOT = process.env.GITHUB_WORKSPACE ?? process.cwd();
+const REPO_ROOT_PATH = path.resolve(REPO_ROOT);
+const SYSTEM_PROMPT = [
+  "You are FlowAI, a top-tier coding agent comparable to the best AI dev tools.",
+  "Operate like a senior engineer: be precise, proactive, and production-ready.",
+  "Your goal is to deliver correct, minimal changes and high-signal guidance.",
+  "",
+  "OUTPUT FORMAT (required): Respond with a single JSON object inside a ```json``` code block.",
+  "Schema:",
+  "{",
+  '  \"comment\": string,',
+  '  \"files\": [{ \"path\": string, \"action\": \"create\"|\"update\"|\"delete\", \"content\"?: string }],',
+  '  \"commitMessage\": string',
+  "}",
+  "",
+  "Rules:",
+  "- If code changes are required, include full file contents for each create/update.",
+  "- For deletes, omit content or set it to an empty string.",
+  "- Use only relative repo paths; never use absolute paths or .. segments.",
+  "- Never output shell commands. Do not describe patches; provide file contents.",
+  "- If no changes are needed, omit files or return an empty array.",
+  "- The comment should include: Summary, Changes, Tests (or 'Not run'), and Next steps if relevant.",
+  "- Ask clarifying questions in the comment if requirements are ambiguous.",
+].join("\n");
 
 const octokit = new Octokit({ auth: core.getInput("github_token") });
 
@@ -208,11 +231,18 @@ async function gatherContext(
 // ─── Agent loop ──────────────────────────────────────────────────────────────
 
 async function agentLoop(instruction: string, context: string): Promise<BotResponse> {
-  const systemPrompt = `You are FlowAI, an expert coding assistant...`;
-
   const messages: Message[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: `## Instruction\n${instruction}\n\n## Repository context\n${context}` },
+    { role: "system", content: SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        "## Instruction",
+        instruction,
+        "",
+        "## Repository context",
+        context,
+      ].join("\n"),
+    },
   ];
 
   let lastResponse = "";
@@ -290,13 +320,104 @@ async function callLLM(messages: Message[], onProgress?: (chunk: string) => void
 // ─── Parsing ─────────────────────────────────────────────────────────────────
 
 function parseResponse(raw: string): BotResponse {
-  const match = raw.match(/```json\s*([\s\S]+?)\s*```/);
-  if (match) {
-    try {
-      return JSON.parse(match[1]);
-    } catch {}
+  const trimmed = raw.trim();
+  const candidates: string[] = [];
+  const codeBlockMatch = trimmed.match(/```json\s*([\s\S]+?)\s*```/i);
+  if (codeBlockMatch?.[1]) candidates.push(codeBlockMatch[1]);
+  if (trimmed) candidates.push(trimmed);
+
+  const extracted = extractJsonObject(trimmed);
+  if (extracted) candidates.push(extracted);
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate);
+    if (parsed) return normalizeBotResponse(parsed, raw);
   }
+
   return { comment: raw };
+}
+
+function tryParseJson(value: string): unknown | null {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonObject(value: string): string | null {
+  const start = value.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < value.length; i++) {
+    const char = value[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+
+    if (depth === 0) {
+      return value.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+function normalizeBotResponse(value: any, fallbackComment: string): BotResponse {
+  const comment =
+    typeof value?.comment === "string" && value.comment.trim()
+      ? value.comment
+      : fallbackComment;
+  const commitMessage =
+    typeof value?.commitMessage === "string" && value.commitMessage.trim()
+      ? value.commitMessage.trim()
+      : undefined;
+  const files = normalizeFileChanges(value?.files);
+
+  return { comment, files, commitMessage };
+}
+
+function normalizeFileChanges(value: unknown): FileChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const normalized: FileChange[] = [];
+
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const file = entry as Partial<FileChange>;
+    if (typeof file.path !== "string" || !file.path.trim()) continue;
+    if (file.action !== "create" && file.action !== "update" && file.action !== "delete") continue;
+    if ((file.action === "create" || file.action === "update") && typeof file.content !== "string") continue;
+
+    normalized.push({
+      path: file.path.trim(),
+      action: file.action,
+      content: typeof file.content === "string" ? file.content : "",
+    });
+  }
+
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeStringValue(value: string): string | null {
@@ -343,28 +464,68 @@ async function applyFileChanges(
   issueNumber?: number,
   prComment?: string,
 ) {
-  execSync(`git config user.name "flowai[bot]"`, { cwd: REPO_ROOT });
-  execSync(`git config user.email "flowai[bot]@users.noreply.github.com"`, { cwd: REPO_ROOT });
+  execFileSync("git", ["config", "user.name", "flowai[bot]"], { cwd: REPO_ROOT });
+  execFileSync("git", ["config", "user.email", "flowai[bot]@users.noreply.github.com"], { cwd: REPO_ROOT });
 
-  let branch = execSync("git branch --show-current", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+  execFileSync("git", ["branch", "--show-current"], { cwd: REPO_ROOT, encoding: "utf8" });
 
   for (const f of files) {
-    const fullPath = path.join(REPO_ROOT, f.path);
+    const safePath = sanitizeRelativePath(f.path);
+    if (!safePath) {
+      console.log(`Skipping unsafe path: ${f.path}`);
+      continue;
+    }
+
+    const fullPath = path.join(REPO_ROOT_PATH, safePath);
 
     if (f.action === "delete") {
       if (fs.existsSync(fullPath)) {
         fs.unlinkSync(fullPath);
-        execSync(`git rm -f "${f.path}"`, { cwd: REPO_ROOT });
+        execFileSync("git", ["rm", "-f", safePath], { cwd: REPO_ROOT });
       }
     } else {
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, f.content);
-      execSync(`git add "${f.path}"`, { cwd: REPO_ROOT });
+      execFileSync("git", ["add", safePath], { cwd: REPO_ROOT });
     }
   }
 
-  execSync(`git commit -m "${commitMessage}"`, { cwd: REPO_ROOT });
-  execSync(`git push`, { cwd: REPO_ROOT });
+  const status = execFileSync("git", ["status", "--porcelain"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  }).trim();
+  if (!status) {
+    console.log("No file changes detected, skipping commit.");
+    return;
+  }
+
+  const sanitizedCommitMessage = sanitizeCommitMessage(commitMessage);
+  execFileSync("git", ["commit", "-m", sanitizedCommitMessage], { cwd: REPO_ROOT });
+  execFileSync("git", ["push"], { cwd: REPO_ROOT });
+}
+
+function sanitizeRelativePath(filePath: string): string | null {
+  const trimmed = filePath.trim().replace(/\\/g, "/");
+  if (!trimmed || trimmed === ".") return null;
+  if (path.isAbsolute(trimmed)) return null;
+  if (trimmed.includes("\0")) return null;
+
+  const normalized = path.posix.normalize(trimmed);
+  if (normalized === "." || normalized === "..") return null;
+  if (normalized.startsWith("../")) return null;
+
+  const segments = normalized.split("/");
+  if (segments.includes(".git") || segments.includes("node_modules")) return null;
+
+  const resolved = path.resolve(REPO_ROOT_PATH, normalized);
+  if (!resolved.startsWith(`${REPO_ROOT_PATH}${path.sep}`)) return null;
+
+  return normalized;
+}
+
+function sanitizeCommitMessage(message: string): string {
+  const cleaned = message.replace(/[\r\n]+/g, " ").trim();
+  return cleaned || "flowai: apply changes";
 }
 
 // ─── Reactions ───────────────────────────────────────────────────────────────

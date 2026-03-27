@@ -1,6 +1,6 @@
 # Flow AI Bot
 
-An AI coding assistant GitHub Action powered by [Pollinations](https://pollinations.ai). Mention `@flowai` in any PR or issue comment to review code, fix bugs, implement features, or build entire codebases from scratch.
+An AI coding assistant GitHub Action powered by [Pollinations](https://pollinations.ai). Zero-install: drop it into a workflow and mention `@flowai` in any PR or issue comment to review code, fix bugs, implement features, or build entire codebases from scratch.
 
 ## Usage
 
