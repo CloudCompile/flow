@@ -554,7 +554,6 @@ function sanitizeRelativePath(filePath: string): string | null {
 function sanitizeCommitMessage(message: string): string {
   const cleaned = message
     .replace(/[\r\n\0]+/g, " ")
-    .replace(/[`$;|&<>"'(){}\[\]*?]/g, "")
     .replace(/\s+/g, " ")
     .trim();
   const safeCharsOnly = cleaned.replace(/[^a-zA-Z0-9 .,_:;!?-]/g, "");
@@ -564,7 +563,8 @@ function sanitizeCommitMessage(message: string): string {
 
 function formatPathForComment(pathValue: string): string {
   const cleaned = pathValue.replace(/[\r\n]/g, "").replace(/`/g, "");
-  return `\`${cleaned}\``;
+  const escaped = cleaned.replace(/([\\*_{}\[\]()#+\-.!|>])/g, "\\$1");
+  return `\`${escaped}\``;
 }
 
 function isWithinRepoPath(resolvedPath: string): boolean {
