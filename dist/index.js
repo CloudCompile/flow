@@ -25968,6 +25968,7 @@ const SYSTEM_PROMPT = [
     "- The comment should include: Summary, Changes, Tests (or 'Not run'), and Next steps if relevant.",
     "- Ask clarifying questions in the comment if requirements are ambiguous.",
 ].join("\n");
+const BLOCKED_PATH_SEGMENTS = new Set([".git", "node_modules"]);
 const octokit = new rest_1.Octokit({ auth: core.getInput("github_token") });
 // ─── Entry point ─────────────────────────────────────────────────────────────
 async function main() {
@@ -26269,7 +26270,7 @@ function normalizeFileChanges(value) {
         normalized.push({
             path: file.path.trim(),
             action: file.action,
-            content: typeof file.content === "string" ? file.content : "",
+            content: file.action === "delete" ? "" : file.content,
         });
     }
     return normalized.length > 0 ? normalized : undefined;
@@ -26312,7 +26313,6 @@ function normalizeComment(comment) {
 async function applyFileChanges(owner, repo, files, commitMessage, prNumber, issueNumber, prComment) {
     (0, child_process_1.execFileSync)("git", ["config", "user.name", "flowai[bot]"], { cwd: REPO_ROOT });
     (0, child_process_1.execFileSync)("git", ["config", "user.email", "flowai[bot]@users.noreply.github.com"], { cwd: REPO_ROOT });
-    (0, child_process_1.execFileSync)("git", ["branch", "--show-current"], { cwd: REPO_ROOT, encoding: "utf8" });
     for (const f of files) {
         const safePath = sanitizeRelativePath(f.path);
         if (!safePath) {
@@ -26358,10 +26358,10 @@ function sanitizeRelativePath(filePath) {
     if (normalized.startsWith("../"))
         return null;
     const segments = normalized.split("/");
-    if (segments.includes(".git") || segments.includes("node_modules"))
+    if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment)))
         return null;
     const resolved = path.resolve(REPO_ROOT_PATH, normalized);
-    if (!resolved.startsWith(`${REPO_ROOT_PATH}${path.sep}`))
+    if (!(resolved === REPO_ROOT_PATH || resolved.startsWith(`${REPO_ROOT_PATH}${path.sep}`)))
         return null;
     return normalized;
 }

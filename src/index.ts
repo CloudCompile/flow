@@ -38,6 +38,7 @@ const SYSTEM_PROMPT = [
   "- The comment should include: Summary, Changes, Tests (or 'Not run'), and Next steps if relevant.",
   "- Ask clarifying questions in the comment if requirements are ambiguous.",
 ].join("\n");
+const BLOCKED_PATH_SEGMENTS = new Set([".git", "node_modules"]);
 
 const octokit = new Octokit({ auth: core.getInput("github_token") });
 
@@ -413,7 +414,7 @@ function normalizeFileChanges(value: unknown): FileChange[] | undefined {
     normalized.push({
       path: file.path.trim(),
       action: file.action,
-      content: typeof file.content === "string" ? file.content : "",
+      content: file.action === "delete" ? "" : (file.content as string),
     });
   }
 
@@ -467,8 +468,6 @@ async function applyFileChanges(
   execFileSync("git", ["config", "user.name", "flowai[bot]"], { cwd: REPO_ROOT });
   execFileSync("git", ["config", "user.email", "flowai[bot]@users.noreply.github.com"], { cwd: REPO_ROOT });
 
-  execFileSync("git", ["branch", "--show-current"], { cwd: REPO_ROOT, encoding: "utf8" });
-
   for (const f of files) {
     const safePath = sanitizeRelativePath(f.path);
     if (!safePath) {
@@ -515,10 +514,10 @@ function sanitizeRelativePath(filePath: string): string | null {
   if (normalized.startsWith("../")) return null;
 
   const segments = normalized.split("/");
-  if (segments.includes(".git") || segments.includes("node_modules")) return null;
+  if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment))) return null;
 
   const resolved = path.resolve(REPO_ROOT_PATH, normalized);
-  if (!resolved.startsWith(`${REPO_ROOT_PATH}${path.sep}`)) return null;
+  if (!(resolved === REPO_ROOT_PATH || resolved.startsWith(`${REPO_ROOT_PATH}${path.sep}`))) return null;
 
   return normalized;
 }
