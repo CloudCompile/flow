@@ -9,6 +9,11 @@ import * as path from "path";
 const POLLINATIONS_API = "https://gen.pollinations.ai/v1/chat/completions";
 const MODEL = core.getInput("model") || "glm";
 const MAX_TOKENS = parseInt(core.getInput("max_tokens") || "32000", 10);
+const MAX_COMMENT_LENGTH = 60000;
+const DEFAULT_COMMENT_MESSAGE = "FlowAI completed this run but did not produce a comment.";
+const OBJECT_FALLBACK_MESSAGE = "[unserializable object response]";
+const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
+const TRUNCATION_SUFFIX_LENGTH = TRUNCATION_SUFFIX.length;
 const REPO_ROOT = process.env.GITHUB_WORKSPACE ?? process.cwd();
 
 const octokit = new Octokit({ auth: core.getInput("github_token") });
@@ -96,6 +101,7 @@ async function main() {
 
   const context = await gatherContext(owner, repo, trigger);
   const response = await agentLoop(trigger.instruction, context);
+  const commentBody = normalizeComment(response.comment);
 
   if (response.files && response.files.length > 0) {
     await applyFileChanges(
@@ -114,7 +120,7 @@ async function main() {
       owner,
       repo,
       issue_number: trigger.issueNumber,
-      body: response.comment,
+      body: commentBody,
     });
   }
 }
@@ -291,6 +297,39 @@ function parseResponse(raw: string): BotResponse {
     } catch {}
   }
   return { comment: raw };
+}
+
+function normalizeStringValue(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.length > MAX_COMMENT_LENGTH) {
+    const available = Math.max(0, MAX_COMMENT_LENGTH - TRUNCATION_SUFFIX_LENGTH);
+    const truncated = trimmed.substring(0, available);
+
+    return `${truncated}${TRUNCATION_SUFFIX}`;
+  }
+
+  return trimmed;
+}
+
+function normalizeComment(comment: unknown): string {
+  if (typeof comment === "string") {
+    const normalized = normalizeStringValue(comment);
+    if (normalized) return normalized;
+  } else if (typeof comment === "object" && comment !== null) {
+    try {
+      const normalized = normalizeStringValue(JSON.stringify(comment));
+      if (normalized) return normalized;
+    } catch {
+      return OBJECT_FALLBACK_MESSAGE;
+    }
+  } else if (comment !== undefined && comment !== null) {
+    const normalized = normalizeStringValue(String(comment));
+    if (normalized) return normalized;
+  }
+
+  return DEFAULT_COMMENT_MESSAGE;
 }
 
 // ─── File changes ────────────────────────────────────────────────────────────
