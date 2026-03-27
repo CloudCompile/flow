@@ -21,6 +21,21 @@ const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
 const TRUNCATION_SUFFIX_LENGTH = TRUNCATION_SUFFIX.length;
 const REPO_ROOT = process.env.GITHUB_WORKSPACE ?? process.cwd();
 const REPO_ROOT_PATH = path.resolve(REPO_ROOT);
+const MAX_ACTIONABLE_RETRIES = 2;
+// Heuristic verbs that usually imply code or docs changes; kept broad but bounded by word-matching.
+const CHANGE_KEYWORD_REGEXES: ReadonlyArray<RegExp> = Object.freeze([
+  /\badd\b/i,
+  /\bcreate\b/i,
+  /\bupdate\b/i,
+  /\bimplement\b/i,
+  /\bwrite\b/i,
+  /\bmodify\b/i,
+  /\brefactor\b/i,
+  /\bbuild\b/i,
+  /\bgenerate\b/i,
+  /\bpatch\b/i,
+  /\bcommit\b/i,
+]);
 const SYSTEM_PROMPT = [
   "You are FlowAI, a top-tier coding agent comparable to the best AI dev tools.",
   "Operate like a senior engineer: be precise, proactive, and production-ready.",
@@ -286,13 +301,34 @@ async function agentLoop(instruction: string, context: string): Promise<BotRespo
   ];
 
   let lastResponse = "";
+  let actionableRetries = 0;
 
   for (let round = 0; round < 3; round++) {
     const raw = await callLLM(messages);
     lastResponse = raw;
     messages.push({ role: "assistant", content: raw });
+    const shouldEvaluateActionable = actionableRetries < MAX_ACTIONABLE_RETRIES;
+    const parsed = shouldEvaluateActionable ? parseResponse(raw) : null;
+    // actionableRetries counts completed retry responses; enforce limit before queuing another attempt.
+    if (parsed && shouldEvaluateActionable && shouldRequestActionableResponse(parsed, instruction)) {
+      actionableRetries += 1;
+      messages.push({
+        role: "user",
+        content: [
+          "Your previous reply did not include any actionable file changes even though the instruction appears to require repository updates.",
+          "Respond again using ONLY a JSON object with the schema { comment, files, commitMessage }.",
+          "Wrap the JSON in a ```json``` code block so it can be parsed.",
+          "Example (wrap in a JSON code block): ```json\n{\"comment\":\"...\",\"files\":[{\"path\":\"example.txt\",\"action\":\"update\",\"content\":\"...\"}],\"commitMessage\":\"...\"}\n```",
+          "Include full file contents for every create/update, and use files: [] only if no changes are truly needed.",
+          "Do not describe commands—provide the resulting file contents to apply.",
+        ].join("\n"),
+      });
+      continue;
+    }
 
-    if (!raw.includes("CONTINUE:")) break;
+    if (!raw.includes("CONTINUE:")) {
+      break;
+    }
     messages.push({ role: "user", content: "Continue with the next step." });
   }
 
@@ -479,6 +515,18 @@ function normalizeFileChanges(value: unknown): FileChange[] | undefined {
   }
 
   return normalized.length > 0 ? normalized : undefined;
+}
+
+export function shouldRequestActionableResponse(parsed: BotResponse, instruction: string): boolean {
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  // Only treat files as actionable when they are a well-formed array; ignore malformed shapes.
+  const files = Array.isArray(parsed.files) ? parsed.files : undefined;
+  if (parsed.files !== undefined && !files) return false;
+  return likelyNeedsFileChanges(instruction) && (!files || files.length === 0);
+}
+
+export function likelyNeedsFileChanges(instruction: string): boolean {
+  return CHANGE_KEYWORD_REGEXES.some(regex => regex.test(instruction));
 }
 
 function normalizeStringValue(value: string): string | null {
@@ -692,4 +740,6 @@ async function postThinkingReaction(owner: string, repo: string, payload: any, e
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
-main().catch(console.error);
+if (process.env.FLOWAI_SKIP_MAIN !== "1") {
+  main().catch(console.error);
+}
