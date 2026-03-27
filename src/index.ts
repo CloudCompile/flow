@@ -1,6 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import * as core from "@actions/core";
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -10,11 +10,41 @@ const POLLINATIONS_API = "https://gen.pollinations.ai/v1/chat/completions";
 const MODEL = core.getInput("model") || "glm";
 const MAX_TOKENS = parseInt(core.getInput("max_tokens") || "32000", 10);
 const MAX_COMMENT_LENGTH = 60000;
+const MAX_COMMIT_MESSAGE_LENGTH = 200;
+const MAX_CONTEXT_SNIPPET_LENGTH = 6000;
+const MAX_CONTEXT_FILES = 8;
+const MAX_REPO_CONFIG_FILES = 4;
+const CONTEXT_TRUNCATION_SUFFIX = "\n...[truncated]";
 const DEFAULT_COMMENT_MESSAGE = "FlowAI completed this run but did not produce a comment.";
 const OBJECT_FALLBACK_MESSAGE = "[unserializable object response]";
 const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
 const TRUNCATION_SUFFIX_LENGTH = TRUNCATION_SUFFIX.length;
 const REPO_ROOT = process.env.GITHUB_WORKSPACE ?? process.cwd();
+const REPO_ROOT_PATH = path.resolve(REPO_ROOT);
+const SYSTEM_PROMPT = [
+  "You are FlowAI, a top-tier coding agent comparable to the best AI dev tools.",
+  "Operate like a senior engineer: be precise, proactive, and production-ready.",
+  "Your goal is to deliver correct, minimal changes and high-signal guidance.",
+  "",
+  "OUTPUT FORMAT (required): Respond with a single JSON object inside a ```json``` code block.",
+  "Schema:",
+  "{",
+  '  \"comment\": string,',
+  '  \"files\": [{ \"path\": string, \"action\": \"create\"|\"update\"|\"delete\", \"content\"?: string }],',
+  '  \"commitMessage\": string',
+  "}",
+  "",
+  "Rules:",
+  "- If code changes are required, include full file contents for each create/update.",
+  "- For deletes, omit content or set it to an empty string.",
+  "- Use only relative repo paths; never use absolute paths or .. segments.",
+  "- Never output shell commands. Do not describe patches; provide file contents.",
+  "- If no changes are needed, omit files or return an empty array.",
+  "- The comment should include: Summary, Changes, Tests (or 'Not run'), and Next steps if relevant.",
+  "- Ask clarifying questions in the comment if requirements are ambiguous.",
+].join("\n");
+const BLOCKED_PATH_SEGMENTS = new Set([".git", "node_modules"]);
+const BLOCKED_FILE_PREFIXES = [".env"];
 
 const octokit = new Octokit({ auth: core.getInput("github_token") });
 
@@ -35,6 +65,7 @@ interface BotResponse {
   comment: string;
   files?: FileChange[];
   commitMessage?: string;
+  parsedFromRaw?: boolean;
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -98,13 +129,16 @@ async function main() {
   }
 
   await postThinkingReaction(owner, repo, payload, eventName);
+  const progressCommentId = trigger.type !== "assigned"
+    ? await createProgressComment(owner, repo, trigger.issueNumber)
+    : undefined;
 
   const context = await gatherContext(owner, repo, trigger);
   const response = await agentLoop(trigger.instruction, context);
-  const commentBody = normalizeComment(response.comment);
+  let skippedPaths: string[] = [];
 
   if (response.files && response.files.length > 0) {
-    await applyFileChanges(
+    skippedPaths = await applyFileChanges(
       owner,
       repo,
       response.files,
@@ -115,13 +149,33 @@ async function main() {
     );
   }
 
+  let commentBody = normalizeComment(response.comment);
+  if (skippedPaths.length > 0) {
+    const warning = [
+      "",
+      "---",
+      "⚠️ Skipped unsafe paths:",
+      ...skippedPaths.map(pathValue => `- ${formatPathForComment(pathValue)}`),
+    ].join("\n");
+    commentBody = normalizeStringValue(`${commentBody}\n${warning}`) ?? commentBody;
+  }
+
   if (trigger.type !== "assigned") {
-    await octokit.issues.createComment({
-      owner,
-      repo,
-      issue_number: trigger.issueNumber,
-      body: commentBody,
-    });
+    if (progressCommentId) {
+      await octokit.issues.updateComment({
+        owner,
+        repo,
+        comment_id: progressCommentId,
+        body: commentBody,
+      });
+    } else {
+      await octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: trigger.issueNumber,
+        body: commentBody,
+      });
+    }
   }
 }
 
@@ -178,8 +232,17 @@ async function gatherContext(
         .join("\n\n");
 
       if (patches) parts.push(`## PR diffs\n${patches}`);
+      const changedPaths = files.map(f => f.filename);
+      const snippets = readContextSnippets(changedPaths, MAX_CONTEXT_FILES);
+      if (snippets) parts.push(`## Relevant file snippets\n${snippets}`);
     } catch {}
   }
+
+  const repoSnippets = readContextSnippets(
+    ["package.json", "tsconfig.json", "action.yml", "README.md"],
+    MAX_REPO_CONFIG_FILES,
+  );
+  if (repoSnippets) parts.push(`## Repository config snippets\n${repoSnippets}`);
 
   try {
     if (trigger.isPR && trigger.prNumber) {
@@ -208,11 +271,18 @@ async function gatherContext(
 // ─── Agent loop ──────────────────────────────────────────────────────────────
 
 async function agentLoop(instruction: string, context: string): Promise<BotResponse> {
-  const systemPrompt = `You are FlowAI, an expert coding assistant...`;
-
   const messages: Message[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: `## Instruction\n${instruction}\n\n## Repository context\n${context}` },
+    { role: "system", content: SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: [
+        "## Instruction",
+        instruction,
+        "",
+        "## Repository context",
+        context,
+      ].join("\n"),
+    },
   ];
 
   let lastResponse = "";
@@ -226,7 +296,18 @@ async function agentLoop(instruction: string, context: string): Promise<BotRespo
     messages.push({ role: "user", content: "Continue with the next step." });
   }
 
-  return parseResponse(lastResponse);
+  let parsed = parseResponse(lastResponse);
+  if (isLikelyParseFailure(parsed)) {
+    const repaired = await repairMalformedJson(lastResponse);
+    if (repaired) {
+      const repairedParsed = parseResponse(repaired);
+      if (!isLikelyParseFailure(repairedParsed)) {
+        parsed = repairedParsed;
+      }
+    }
+  }
+
+  return parsed;
 }
 
 // ─── STREAMING LLM ───────────────────────────────────────────────────────────
@@ -290,13 +371,114 @@ async function callLLM(messages: Message[], onProgress?: (chunk: string) => void
 // ─── Parsing ─────────────────────────────────────────────────────────────────
 
 function parseResponse(raw: string): BotResponse {
-  const match = raw.match(/```json\s*([\s\S]+?)\s*```/);
-  if (match) {
-    try {
-      return JSON.parse(match[1]);
-    } catch {}
+  const trimmed = raw.trim();
+  const candidates: string[] = [];
+  const codeBlockMatch = trimmed.match(/```json\s*([\s\S]+?)\s*```/i);
+  if (codeBlockMatch?.[1]) candidates.push(codeBlockMatch[1]);
+  if (trimmed) candidates.push(trimmed);
+
+  const extracted = extractJsonObject(trimmed);
+  if (extracted) candidates.push(extracted);
+
+  for (const candidate of candidates) {
+    const parsed = tryParseJson(candidate);
+    if (parsed) return normalizeBotResponse(parsed, raw);
   }
-  return { comment: raw };
+
+  return { comment: raw, parsedFromRaw: true };
+}
+
+function tryParseJson(value: string): unknown | null {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonObject(value: string): string | null {
+  const start = value.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < value.length; i++) {
+    const char = value[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\" && inString) {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) continue;
+
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+
+    if (depth === 0) {
+      return value.slice(start, i + 1);
+    }
+  }
+
+  return null;
+}
+
+function normalizeBotResponse(value: unknown, fallbackComment: string): BotResponse {
+  const record = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const comment =
+    typeof record.comment === "string" && record.comment.trim()
+      ? record.comment
+      : fallbackComment;
+  const commitMessage =
+    typeof record.commitMessage === "string" && record.commitMessage.trim()
+      ? record.commitMessage.trim()
+      : undefined;
+  const files = normalizeFileChanges(record.files);
+
+  return { comment, files, commitMessage };
+}
+
+function normalizeFileChanges(value: unknown): FileChange[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+
+  const normalized: FileChange[] = [];
+
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const file = entry as Partial<FileChange>;
+    if (typeof file.path !== "string" || !file.path.trim()) continue;
+    if (file.action !== "create" && file.action !== "update" && file.action !== "delete") continue;
+    const requiresContent = file.action === "create" || file.action === "update";
+    if (requiresContent) {
+      if (typeof file.content !== "string") continue;
+      normalized.push({
+        path: file.path.trim(),
+        action: file.action,
+        content: file.content,
+      });
+      continue;
+    }
+
+    normalized.push({
+      path: file.path.trim(),
+      action: file.action,
+      content: "",
+    });
+  }
+
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 function normalizeStringValue(value: string): string | null {
@@ -342,29 +524,158 @@ async function applyFileChanges(
   prNumber?: number,
   issueNumber?: number,
   prComment?: string,
-) {
-  execSync(`git config user.name "flowai[bot]"`, { cwd: REPO_ROOT });
-  execSync(`git config user.email "flowai[bot]@users.noreply.github.com"`, { cwd: REPO_ROOT });
-
-  let branch = execSync("git branch --show-current", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
+): Promise<string[]> {
+  const skippedPaths: string[] = [];
+  execFileSync("git", ["config", "user.name", "flowai[bot]"], { cwd: REPO_ROOT });
+  execFileSync("git", ["config", "user.email", "flowai[bot]@users.noreply.github.com"], { cwd: REPO_ROOT });
 
   for (const f of files) {
-    const fullPath = path.join(REPO_ROOT, f.path);
+    const safePath = sanitizeRelativePath(f.path);
+    if (!safePath) {
+      console.log(`Skipping unsafe path: ${f.path}`);
+      skippedPaths.push(f.path);
+      continue;
+    }
+
+    const fullPath = path.join(REPO_ROOT_PATH, safePath);
 
     if (f.action === "delete") {
       if (fs.existsSync(fullPath)) {
         fs.unlinkSync(fullPath);
-        execSync(`git rm -f "${f.path}"`, { cwd: REPO_ROOT });
+        execFileSync("git", ["rm", "-f", safePath], { cwd: REPO_ROOT });
       }
     } else {
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, f.content);
-      execSync(`git add "${f.path}"`, { cwd: REPO_ROOT });
+      execFileSync("git", ["add", safePath], { cwd: REPO_ROOT });
     }
   }
 
-  execSync(`git commit -m "${commitMessage}"`, { cwd: REPO_ROOT });
-  execSync(`git push`, { cwd: REPO_ROOT });
+  const status = execFileSync("git", ["status", "--porcelain"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  }).trim();
+  if (!status) {
+    console.log("No file changes detected, skipping commit.");
+    return skippedPaths;
+  }
+
+  const sanitizedCommitMessage = sanitizeCommitMessage(commitMessage);
+  execFileSync("git", ["commit", "-m", sanitizedCommitMessage], { cwd: REPO_ROOT });
+  execFileSync("git", ["push"], { cwd: REPO_ROOT });
+  return skippedPaths;
+}
+
+function sanitizeRelativePath(filePath: string): string | null {
+  const trimmed = filePath.trim();
+  if (!trimmed || trimmed === ".") return null;
+  if (path.isAbsolute(trimmed)) return null;
+  if (trimmed.includes("\0")) return null;
+
+  const normalized = path.normalize(trimmed).replace(/\\/g, "/");
+  if (normalized === "." || normalized === "..") return null;
+  if (normalized.startsWith("../")) return null;
+
+  const segments = normalized.split("/");
+  if (segments.includes("..")) return null;
+  if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment))) return null;
+  const fileName = path.posix.basename(normalized);
+  if (BLOCKED_FILE_PREFIXES.some(prefix => fileName.startsWith(prefix))) return null;
+
+  const resolved = path.resolve(REPO_ROOT_PATH, normalized);
+  if (!isWithinRepoPath(resolved)) return null;
+
+  return normalized;
+}
+
+function sanitizeCommitMessage(message: string): string {
+  const cleaned = message
+    .replace(/[\r\n\0]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const withoutControlChars = cleaned.replace(/[\u0000-\u001F\u007F]/g, "");
+  const truncated = withoutControlChars.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
+  return truncated || "flowai: apply changes";
+}
+
+function formatPathForComment(pathValue: string): string {
+  const cleaned = pathValue.replace(/[\r\n]/g, "").replace(/`/g, "");
+  const escaped = cleaned.replace(/([\\*_{}\[\]()#+.!|>\-])/g, "\\$1");
+  return `\`${escaped}\``;
+}
+
+function isWithinRepoPath(resolvedPath: string): boolean {
+  const relative = path.relative(REPO_ROOT_PATH, resolvedPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function readContextSnippets(relativePaths: string[], limit: number): string | null {
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+
+  for (const relPath of relativePaths) {
+    if (snippets.length >= limit) break;
+    const safePath = sanitizeRelativePath(relPath);
+    if (!safePath || seen.has(safePath)) continue;
+    seen.add(safePath);
+
+    const fullPath = path.resolve(REPO_ROOT_PATH, safePath);
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) continue;
+
+    try {
+      const fileContent = fs.readFileSync(fullPath, "utf8");
+      const snippet = fileContent.length > MAX_CONTEXT_SNIPPET_LENGTH
+        ? `${fileContent.slice(0, MAX_CONTEXT_SNIPPET_LENGTH)}${CONTEXT_TRUNCATION_SUFFIX}`
+        : fileContent;
+      snippets.push(`### ${safePath}\n\`\`\`\n${snippet}\n\`\`\``);
+    } catch {}
+  }
+
+  return snippets.length > 0 ? snippets.join("\n\n") : null;
+}
+
+function isLikelyParseFailure(parsed: BotResponse): boolean {
+  return parsed.parsedFromRaw === true;
+}
+
+async function repairMalformedJson(raw: string): Promise<string | null> {
+  const repairMessages: Message[] = [
+    {
+      role: "system",
+      content: "Convert the assistant output to valid JSON only. Keep the same intent and content.",
+    },
+    {
+      role: "user",
+      content: [
+        "Return ONLY a single valid JSON object with keys: comment, files, commitMessage.",
+        "files must be an array of { path, action, content }.",
+        "If fields are missing, infer best effort and keep files as [] when unknown.",
+        "",
+        "Assistant output to repair:",
+        raw,
+      ].join("\n"),
+    },
+  ];
+
+  try {
+    return await callLLM(repairMessages);
+  } catch {
+    return null;
+  }
+}
+
+async function createProgressComment(owner: string, repo: string, issueNumber: number): Promise<number | undefined> {
+  try {
+    const { data } = await octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      body: "👀 FlowAI is analyzing context and preparing changes...",
+    });
+    return data.id;
+  } catch {
+    return undefined;
+  }
 }
 
 // ─── Reactions ───────────────────────────────────────────────────────────────
