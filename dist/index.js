@@ -26167,11 +26167,11 @@ async function agentLoop(instruction, context) {
         messages.push({ role: "user", content: "Continue with the next step." });
     }
     let parsed = parseResponse(lastResponse);
-    if (isLikelyParseFailure(parsed, lastResponse)) {
-        const repaired = await repairMalformedResponse(lastResponse);
+    if (isLikelyParseFailure(parsed)) {
+        const repaired = await repairMalformedJson(lastResponse);
         if (repaired) {
             const repairedParsed = parseResponse(repaired);
-            if (!isLikelyParseFailure(repairedParsed, repaired)) {
+            if (!isLikelyParseFailure(repairedParsed)) {
                 parsed = repairedParsed;
             }
         }
@@ -26469,12 +26469,12 @@ function readContextSnippets(relativePaths, limit) {
         }
         catch { }
     }
-    return snippets.join("\n\n");
+    return snippets.length > 0 ? snippets.join("\n\n") : null;
 }
-function isLikelyParseFailure(parsed, raw) {
+function isLikelyParseFailure(parsed) {
     return parsed.parsedFromRaw === true;
 }
-async function repairMalformedResponse(raw) {
+async function repairMalformedJson(raw) {
     const repairMessages = [
         {
             role: "system",

@@ -297,11 +297,11 @@ async function agentLoop(instruction: string, context: string): Promise<BotRespo
   }
 
   let parsed = parseResponse(lastResponse);
-  if (isLikelyParseFailure(parsed, lastResponse)) {
-    const repaired = await repairMalformedResponse(lastResponse);
+  if (isLikelyParseFailure(parsed)) {
+    const repaired = await repairMalformedJson(lastResponse);
     if (repaired) {
       const repairedParsed = parseResponse(repaired);
-      if (!isLikelyParseFailure(repairedParsed, repaired)) {
+      if (!isLikelyParseFailure(repairedParsed)) {
         parsed = repairedParsed;
       }
     }
@@ -609,7 +609,7 @@ function isWithinRepoPath(resolvedPath: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function readContextSnippets(relativePaths: string[], limit: number): string {
+function readContextSnippets(relativePaths: string[], limit: number): string | null {
   const snippets: string[] = [];
   const seen = new Set<string>();
 
@@ -631,14 +631,14 @@ function readContextSnippets(relativePaths: string[], limit: number): string {
     } catch {}
   }
 
-  return snippets.join("\n\n");
+  return snippets.length > 0 ? snippets.join("\n\n") : null;
 }
 
-function isLikelyParseFailure(parsed: BotResponse, raw: string): boolean {
+function isLikelyParseFailure(parsed: BotResponse): boolean {
   return parsed.parsedFromRaw === true;
 }
 
-async function repairMalformedResponse(raw: string): Promise<string | null> {
+async function repairMalformedJson(raw: string): Promise<string | null> {
   const repairMessages: Message[] = [
     {
       role: "system",
