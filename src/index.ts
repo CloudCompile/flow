@@ -13,6 +13,8 @@ const MAX_COMMENT_LENGTH = 60000;
 const MAX_COMMIT_MESSAGE_LENGTH = 200;
 const MAX_CONTEXT_SNIPPET_LENGTH = 6000;
 const MAX_CONTEXT_FILES = 8;
+const MAX_REPO_CONFIG_FILES = 4;
+const CONTEXT_TRUNCATION_SUFFIX = "\n...[truncated]";
 const DEFAULT_COMMENT_MESSAGE = "FlowAI completed this run but did not produce a comment.";
 const OBJECT_FALLBACK_MESSAGE = "[unserializable object response]";
 const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
@@ -63,6 +65,7 @@ interface BotResponse {
   comment: string;
   files?: FileChange[];
   commitMessage?: string;
+  parsedFromRaw?: boolean;
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
@@ -235,7 +238,10 @@ async function gatherContext(
     } catch {}
   }
 
-  const repoSnippets = readContextSnippets(["package.json", "tsconfig.json", "action.yml", "README.md"], 4);
+  const repoSnippets = readContextSnippets(
+    ["package.json", "tsconfig.json", "action.yml", "README.md"],
+    MAX_REPO_CONFIG_FILES,
+  );
   if (repoSnippets) parts.push(`## Repository config snippets\n${repoSnippets}`);
 
   try {
@@ -379,7 +385,7 @@ function parseResponse(raw: string): BotResponse {
     if (parsed) return normalizeBotResponse(parsed, raw);
   }
 
-  return { comment: raw };
+  return { comment: raw, parsedFromRaw: true };
 }
 
 function tryParseJson(value: string): unknown | null {
@@ -619,7 +625,7 @@ function readContextSnippets(relativePaths: string[], limit: number): string {
     try {
       const fileContent = fs.readFileSync(fullPath, "utf8");
       const snippet = fileContent.length > MAX_CONTEXT_SNIPPET_LENGTH
-        ? `${fileContent.slice(0, MAX_CONTEXT_SNIPPET_LENGTH)}\n...[truncated]`
+        ? `${fileContent.slice(0, MAX_CONTEXT_SNIPPET_LENGTH)}${CONTEXT_TRUNCATION_SUFFIX}`
         : fileContent;
       snippets.push(`### ${safePath}\n\`\`\`\n${snippet}\n\`\`\``);
     } catch {}
@@ -629,7 +635,7 @@ function readContextSnippets(relativePaths: string[], limit: number): string {
 }
 
 function isLikelyParseFailure(parsed: BotResponse, raw: string): boolean {
-  return parsed.comment === raw && !parsed.files?.length && !parsed.commitMessage;
+  return parsed.parsedFromRaw === true;
 }
 
 async function repairMalformedResponse(raw: string): Promise<string | null> {
