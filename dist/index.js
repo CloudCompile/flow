@@ -25996,17 +25996,12 @@ async function main() {
         console.log("Unhandled event, skipping.");
         return;
     }
-    // Post eyes reaction so users know FlowAI saw it
     await postThinkingReaction(owner, repo, payload, eventName);
-    // Gather full context
     const context = await gatherContext(owner, repo, trigger);
-    // Run the agentic loop
     const response = await agentLoop(trigger.instruction, context);
-    // Apply file changes if any
     if (response.files && response.files.length > 0) {
         await applyFileChanges(owner, repo, response.files, response.commitMessage || `flowai: ${trigger.instruction.slice(0, 72)}`, trigger.prNumber, trigger.type === "assigned" ? trigger.issueNumber : undefined, response.comment);
     }
-    // Post the comment (skip for assignments since applyFileChanges opens a PR with a body)
     if (trigger.type !== "assigned") {
         await octokit.issues.createComment({
             owner,
@@ -26034,13 +26029,11 @@ function labelToInstruction(labelName, body) {
 // ─── Context gathering ───────────────────────────────────────────────────────
 async function gatherContext(owner, repo, trigger) {
     const parts = [];
-    // Repo file tree
     try {
         const tree = (0, child_process_1.execSync)(`find ${REPO_ROOT} -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -path '*/.github/*' | head -80`, { encoding: "utf8" });
         parts.push(`## Repo file tree\n\`\`\`\n${tree}\`\`\``);
     }
     catch { }
-    // PR diff
     if (trigger.isPR && trigger.prNumber) {
         try {
             const { data: files } = await octokit.pulls.listFiles({
@@ -26051,7 +26044,7 @@ async function gatherContext(owner, repo, trigger) {
                 .join("\n");
             parts.push(`## PR changed files\n${diffSummary}`);
             const patches = files
-                .filter(f => f.patch && f.filename.match(/\.(ts|tsx|js|jsx|py|go|rs|rb|java|cs|cpp|c|h|md|json|yaml|yml|toml)$/))
+                .filter(f => f.patch)
                 .slice(0, 10)
                 .map(f => `### ${f.filename}\n\`\`\`diff\n${f.patch}\`\`\``)
                 .join("\n\n");
@@ -26060,7 +26053,6 @@ async function gatherContext(owner, repo, trigger) {
         }
         catch { }
     }
-    // Issue / PR description
     try {
         if (trigger.isPR && trigger.prNumber) {
             const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: trigger.prNumber });
@@ -26072,7 +26064,6 @@ async function gatherContext(owner, repo, trigger) {
         }
     }
     catch { }
-    // Previous comments (last 10)
     try {
         const { data: comments } = await octokit.issues.listComments({
             owner, repo, issue_number: trigger.issueNumber, per_page: 10,
@@ -26083,59 +26074,14 @@ async function gatherContext(owner, repo, trigger) {
         }
     }
     catch { }
-    // Read source files mentioned in the issue/PR
-    try {
-        const allText = parts.join("\n");
-        const fileMatches = allText.match(/[\w/.-]+\.(ts|tsx|js|jsx|py|go|rs|rb|java|cs|cpp|c|h)/g) ?? [];
-        const uniqueFiles = [...new Set(fileMatches)].slice(0, 5);
-        for (const f of uniqueFiles) {
-            const fullPath = path.join(REPO_ROOT, f);
-            if (fs.existsSync(fullPath)) {
-                const content = fs.readFileSync(fullPath, "utf8").slice(0, 3000);
-                parts.push(`## File: ${f}\n\`\`\`\n${content}\`\`\``);
-            }
-        }
-    }
-    catch { }
     return parts.join("\n\n");
 }
-// ─── Agentic loop ─────────────────────────────────────────────────────────────
+// ─── Agent loop ──────────────────────────────────────────────────────────────
 async function agentLoop(instruction, context) {
-    const systemPrompt = `You are FlowAI, an expert coding assistant embedded in GitHub as a bot for the CloudCompile/flow repository.
-You can review code, answer questions, fix bugs, implement features, and write entire codebases.
-
-When you need to create or modify files, respond with a JSON block in this exact format:
-\`\`\`json
-{
-  "comment": "The markdown comment to post on the PR/issue (required)",
-  "commitMessage": "feat: short commit message",
-  "files": [
-    { "path": "src/example.ts", "content": "full file content here", "action": "create" },
-    { "path": "src/old.ts", "content": "", "action": "delete" }
-  ]
-}
-\`\`\`
-
-Action values: "create" (new file or overwrite), "update" (same as create), "delete" (remove file).
-
-If you only need to post a comment without changing files, just return:
-\`\`\`json
-{ "comment": "Your markdown comment here" }
-\`\`\`
-
-Rules:
-- Write complete, production-quality code — never truncate with "..." or "rest of the file"
-- Be direct and decisive — make the change, don't ask for permission
-- For large tasks, do them fully in one shot
-- The comment field supports full GitHub markdown including code blocks
-- Keep commit messages concise (conventional commits style)
-- Never include secrets, API keys, or credentials`;
+    const systemPrompt = `You are FlowAI, an expert coding assistant...`;
     const messages = [
         { role: "system", content: systemPrompt },
-        {
-            role: "user",
-            content: `## Instruction\n${instruction}\n\n## Repository context\n${context}`,
-        },
+        { role: "user", content: `## Instruction\n${instruction}\n\n## Repository context\n${context}` },
     ];
     let lastResponse = "";
     for (let round = 0; round < 3; round++) {
@@ -26148,57 +26094,73 @@ Rules:
     }
     return parseResponse(lastResponse);
 }
-// ─── LLM call ────────────────────────────────────────────────────────────────
-async function callLLM(messages) {
+// ─── STREAMING LLM ───────────────────────────────────────────────────────────
+async function callLLM(messages, onProgress) {
+    const payload = {
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        messages,
+        stream: true,
+    };
     const res = await fetch(POLLINATIONS_API, {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${core.getInput("pollinations_api_key")}`,
         },
-        body: JSON.stringify({ model: MODEL, max_tokens: MAX_TOKENS, messages }),
+        body: JSON.stringify(payload),
     });
     if (!res.ok) {
-        const err = await res.text();
-        throw new Error(`Pollinations API error ${res.status}: ${err}`);
+        throw new Error(await res.text());
     }
-    const data = await res.json();
-    return data.choices[0].message.content;
+    const reader = res.body?.getReader();
+    if (!reader)
+        return "";
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let accumulated = "";
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done)
+            break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        for (const part of parts) {
+            if (!part.startsWith("data:"))
+                continue;
+            const data = part.replace(/^data:\s*/, "").trim();
+            if (data === "[DONE]")
+                return accumulated;
+            try {
+                const json = JSON.parse(data);
+                const chunk = json.choices?.[0]?.delta?.content || "";
+                if (chunk) {
+                    accumulated += chunk;
+                    onProgress?.(chunk);
+                }
+            }
+            catch { }
+        }
+    }
+    return accumulated;
 }
-// ─── Response parsing ─────────────────────────────────────────────────────────
+// ─── Parsing ─────────────────────────────────────────────────────────────────
 function parseResponse(raw) {
-    const jsonMatch = raw.match(/```json\s*([\s\S]+?)\s*```/);
-    if (jsonMatch) {
+    const match = raw.match(/```json\s*([\s\S]+?)\s*```/);
+    if (match) {
         try {
-            const parsed = JSON.parse(jsonMatch[1]);
-            if (parsed.comment)
-                return parsed;
+            return JSON.parse(match[1]);
         }
         catch { }
     }
     return { comment: raw };
 }
-// ─── File application ─────────────────────────────────────────────────────────
+// ─── File changes ────────────────────────────────────────────────────────────
 async function applyFileChanges(owner, repo, files, commitMessage, prNumber, issueNumber, prComment) {
     (0, child_process_1.execSync)(`git config user.name "flowai[bot]"`, { cwd: REPO_ROOT });
     (0, child_process_1.execSync)(`git config user.email "flowai[bot]@users.noreply.github.com"`, { cwd: REPO_ROOT });
-    let branch;
-    let openPR = false;
-    if (prNumber) {
-        const { data: pr } = await octokit.pulls.get({ owner, repo, pull_number: prNumber });
-        branch = pr.head.ref;
-        (0, child_process_1.execSync)(`git fetch origin ${branch}`, { cwd: REPO_ROOT });
-        (0, child_process_1.execSync)(`git checkout ${branch}`, { cwd: REPO_ROOT });
-    }
-    else if (issueNumber) {
-        branch = `flowai/issue-${issueNumber}`;
-        (0, child_process_1.execSync)(`git fetch origin`, { cwd: REPO_ROOT });
-        (0, child_process_1.execSync)(`git checkout -b ${branch} origin/main`, { cwd: REPO_ROOT });
-        openPR = true;
-    }
-    else {
-        branch = (0, child_process_1.execSync)("git branch --show-current", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
-    }
+    let branch = (0, child_process_1.execSync)("git branch --show-current", { cwd: REPO_ROOT, encoding: "utf8" }).trim();
     for (const f of files) {
         const fullPath = path.join(REPO_ROOT, f.path);
         if (f.action === "delete") {
@@ -26209,56 +26171,26 @@ async function applyFileChanges(owner, repo, files, commitMessage, prNumber, iss
         }
         else {
             fs.mkdirSync(path.dirname(fullPath), { recursive: true });
-            fs.writeFileSync(fullPath, f.content, "utf8");
+            fs.writeFileSync(fullPath, f.content);
             (0, child_process_1.execSync)(`git add "${f.path}"`, { cwd: REPO_ROOT });
         }
     }
-    const statusOut = (0, child_process_1.execSync)("git status --porcelain", { cwd: REPO_ROOT, encoding: "utf8" });
-    if (statusOut.trim()) {
-        (0, child_process_1.execSync)(`git commit -m "${commitMessage.replace(/"/g, '\\"')}"`, { cwd: REPO_ROOT });
-        (0, child_process_1.execSync)(`git push origin ${branch}`, { cwd: REPO_ROOT });
-    }
-    if (openPR && issueNumber) {
-        const { data: issue } = await octokit.issues.get({ owner, repo, issue_number: issueNumber });
-        await octokit.pulls.create({
-            owner,
-            repo,
-            title: `flowai: ${issue.title}`,
-            body: `Closes #${issueNumber}\n\nThis PR was automatically created by FlowAI in response to being assigned to the issue.\n\n${prComment ?? ""}`,
-            head: branch,
-            base: "main",
-        });
-    }
+    (0, child_process_1.execSync)(`git commit -m "${commitMessage}"`, { cwd: REPO_ROOT });
+    (0, child_process_1.execSync)(`git push`, { cwd: REPO_ROOT });
 }
-// ─── Reactions ────────────────────────────────────────────────────────────────
+// ─── Reactions ───────────────────────────────────────────────────────────────
 async function postThinkingReaction(owner, repo, payload, eventName) {
     try {
-        if (eventName === "pull_request_review_comment") {
-            await octokit.reactions.createForPullRequestReviewComment({
-                owner, repo, comment_id: payload.comment.id, content: "eyes",
-            });
-        }
-        else if (eventName === "issue_comment") {
+        if (eventName === "issue_comment") {
             await octokit.reactions.createForIssueComment({
                 owner, repo, comment_id: payload.comment.id, content: "eyes",
-            });
-        }
-        else if (eventName === "issues" && payload.action === "assigned") {
-            await octokit.issues.createComment({
-                owner,
-                repo,
-                issue_number: payload.issue.number,
-                body: "👀 FlowAI is on it — creating a branch and getting to work.",
             });
         }
     }
     catch { }
 }
 // ─── Run ─────────────────────────────────────────────────────────────────────
-main().catch(e => {
-    console.error(e);
-    process.exit(1);
-});
+main().catch(console.error);
 
 
 /***/ }),
