@@ -40,6 +40,7 @@ const SYSTEM_PROMPT = [
   "- Ask clarifying questions in the comment if requirements are ambiguous.",
 ].join("\n");
 const BLOCKED_PATH_SEGMENTS = new Set([".git", "node_modules"]);
+const BLOCKED_FILE_PREFIXES = [".env"];
 
 const octokit = new Octokit({ auth: core.getInput("github_token") });
 
@@ -541,6 +542,8 @@ function sanitizeRelativePath(filePath: string): string | null {
   const segments = normalized.split("/");
   if (segments.includes("..")) return null;
   if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment))) return null;
+  const fileName = path.posix.basename(normalized);
+  if (BLOCKED_FILE_PREFIXES.some(prefix => fileName.startsWith(prefix))) return null;
 
   const resolved = path.resolve(REPO_ROOT_PATH, normalized);
   if (!isWithinRepoPath(resolved)) return null;
@@ -551,7 +554,7 @@ function sanitizeRelativePath(filePath: string): string | null {
 function sanitizeCommitMessage(message: string): string {
   const cleaned = message
     .replace(/[\r\n\0]+/g, " ")
-    .replace(/[`$;|&<>"']/g, "")
+    .replace(/[`$;|&<>"'(){}\[\]*?]/g, "")
     .replace(/\s+/g, " ")
     .trim();
   const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
