@@ -147,7 +147,7 @@ async function main() {
       "",
       "---",
       "⚠️ Skipped unsafe paths:",
-      ...skippedPaths.map(pathValue => `- ${pathValue}`),
+      ...skippedPaths.map(pathValue => `- ${formatPathForComment(pathValue)}`),
     ].join("\n");
     commentBody = normalizeStringValue(`${commentBody}\n${warning}`) ?? commentBody;
   }
@@ -530,7 +530,7 @@ async function applyFileChanges(
 }
 
 function sanitizeRelativePath(filePath: string): string | null {
-  const trimmed = filePath.trim().replace(/\\/g, "/");
+  const trimmed = filePath.trim();
   if (!trimmed || trimmed === ".") return null;
   if (path.isAbsolute(trimmed)) return null;
   if (trimmed.includes("\0")) return null;
@@ -557,8 +557,14 @@ function sanitizeCommitMessage(message: string): string {
     .replace(/[`$;|&<>"'(){}\[\]*?]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
+  const safeCharsOnly = cleaned.replace(/[^a-zA-Z0-9 .,_:;!?-]/g, "");
+  const truncated = safeCharsOnly.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
   return truncated || "flowai: apply changes";
+}
+
+function formatPathForComment(pathValue: string): string {
+  const cleaned = pathValue.replace(/[\r\n]/g, "").replace(/`/g, "");
+  return `\`${cleaned}\``;
 }
 
 function isWithinRepoPath(resolvedPath: string): boolean {

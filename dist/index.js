@@ -26040,7 +26040,7 @@ async function main() {
             "",
             "---",
             "⚠️ Skipped unsafe paths:",
-            ...skippedPaths.map(pathValue => `- ${pathValue}`),
+            ...skippedPaths.map(pathValue => `- ${formatPathForComment(pathValue)}`),
         ].join("\n");
         commentBody = normalizeStringValue(`${commentBody}\n${warning}`) ?? commentBody;
     }
@@ -26370,7 +26370,7 @@ async function applyFileChanges(owner, repo, files, commitMessage, prNumber, iss
     return skippedPaths;
 }
 function sanitizeRelativePath(filePath) {
-    const trimmed = filePath.trim().replace(/\\/g, "/");
+    const trimmed = filePath.trim();
     if (!trimmed || trimmed === ".")
         return null;
     if (path.isAbsolute(trimmed))
@@ -26401,8 +26401,13 @@ function sanitizeCommitMessage(message) {
         .replace(/[`$;|&<>"'(){}\[\]*?]/g, "")
         .replace(/\s+/g, " ")
         .trim();
-    const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
+    const safeCharsOnly = cleaned.replace(/[^a-zA-Z0-9 .,_:;!?-]/g, "");
+    const truncated = safeCharsOnly.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
     return truncated || "flowai: apply changes";
+}
+function formatPathForComment(pathValue) {
+    const cleaned = pathValue.replace(/[\r\n]/g, "").replace(/`/g, "");
+    return `\`${cleaned}\``;
 }
 function isWithinRepoPath(resolvedPath) {
     const relative = path.relative(REPO_ROOT_PATH, resolvedPath);
