@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: CloudCompile/flow@v4
+      - uses: CloudCompile/flow@v5
         with:
           pollinations_api_key: ${{ secrets.POLLINATIONS_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
