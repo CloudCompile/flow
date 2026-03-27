@@ -25940,6 +25940,7 @@ const POLLINATIONS_API = "https://gen.pollinations.ai/v1/chat/completions";
 const MODEL = core.getInput("model") || "glm";
 const MAX_TOKENS = parseInt(core.getInput("max_tokens") || "32000", 10);
 const MAX_COMMENT_LENGTH = 60000;
+const MAX_COMMIT_MESSAGE_LENGTH = 200;
 const DEFAULT_COMMENT_MESSAGE = "FlowAI completed this run but did not produce a comment.";
 const OBJECT_FALLBACK_MESSAGE = "[unserializable object response]";
 const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
@@ -26244,13 +26245,14 @@ function extractJsonObject(value) {
     return null;
 }
 function normalizeBotResponse(value, fallbackComment) {
-    const comment = typeof value?.comment === "string" && value.comment.trim()
-        ? value.comment
+    const record = typeof value === "object" && value !== null ? value : {};
+    const comment = typeof record.comment === "string" && record.comment.trim()
+        ? record.comment
         : fallbackComment;
-    const commitMessage = typeof value?.commitMessage === "string" && value.commitMessage.trim()
-        ? value.commitMessage.trim()
+    const commitMessage = typeof record.commitMessage === "string" && record.commitMessage.trim()
+        ? record.commitMessage.trim()
         : undefined;
-    const files = normalizeFileChanges(value?.files);
+    const files = normalizeFileChanges(record.files);
     return { comment, files, commitMessage };
 }
 function normalizeFileChanges(value) {
@@ -26371,7 +26373,7 @@ function sanitizeCommitMessage(message) {
         .replace(/[\r\n\0]+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-    const truncated = cleaned.slice(0, 200);
+    const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
     return truncated || "flowai: apply changes";
 }
 function isWithinRepoPath(resolvedPath) {
