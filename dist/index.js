@@ -26029,9 +26029,19 @@ async function main() {
     await postThinkingReaction(owner, repo, payload, eventName);
     const context = await gatherContext(owner, repo, trigger);
     const response = await agentLoop(trigger.instruction, context);
-    const commentBody = normalizeComment(response.comment);
+    let skippedPaths = [];
     if (response.files && response.files.length > 0) {
-        await applyFileChanges(owner, repo, response.files, response.commitMessage || `flowai: ${trigger.instruction.slice(0, 72)}`, trigger.prNumber, trigger.type === "assigned" ? trigger.issueNumber : undefined, response.comment);
+        skippedPaths = await applyFileChanges(owner, repo, response.files, response.commitMessage || `flowai: ${trigger.instruction.slice(0, 72)}`, trigger.prNumber, trigger.type === "assigned" ? trigger.issueNumber : undefined, response.comment);
+    }
+    let commentBody = normalizeComment(response.comment);
+    if (skippedPaths.length > 0) {
+        const warning = [
+            "",
+            "---",
+            "⚠️ Skipped unsafe paths:",
+            ...skippedPaths.map(pathValue => `- ${pathValue}`),
+        ].join("\n");
+        commentBody = normalizeStringValue(`${commentBody}\n${warning}`) ?? commentBody;
     }
     if (trigger.type !== "assigned") {
         await octokit.issues.createComment({
@@ -26322,12 +26332,14 @@ function normalizeComment(comment) {
 }
 // ─── File changes ────────────────────────────────────────────────────────────
 async function applyFileChanges(owner, repo, files, commitMessage, prNumber, issueNumber, prComment) {
+    const skippedPaths = [];
     (0, child_process_1.execFileSync)("git", ["config", "user.name", "flowai[bot]"], { cwd: REPO_ROOT });
     (0, child_process_1.execFileSync)("git", ["config", "user.email", "flowai[bot]@users.noreply.github.com"], { cwd: REPO_ROOT });
     for (const f of files) {
         const safePath = sanitizeRelativePath(f.path);
         if (!safePath) {
             console.log(`Skipping unsafe path: ${f.path}`);
+            skippedPaths.push(f.path);
             continue;
         }
         const fullPath = path.join(REPO_ROOT_PATH, safePath);
@@ -26349,11 +26361,12 @@ async function applyFileChanges(owner, repo, files, commitMessage, prNumber, iss
     }).trim();
     if (!status) {
         console.log("No file changes detected, skipping commit.");
-        return;
+        return skippedPaths;
     }
     const sanitizedCommitMessage = sanitizeCommitMessage(commitMessage);
     (0, child_process_1.execFileSync)("git", ["commit", "-m", sanitizedCommitMessage], { cwd: REPO_ROOT });
     (0, child_process_1.execFileSync)("git", ["push"], { cwd: REPO_ROOT });
+    return skippedPaths;
 }
 function sanitizeRelativePath(filePath) {
     const trimmed = filePath.trim().replace(/\\/g, "/");
@@ -26369,6 +26382,8 @@ function sanitizeRelativePath(filePath) {
     if (normalized.startsWith("../"))
         return null;
     const segments = normalized.split("/");
+    if (segments.includes(".."))
+        return null;
     if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment)))
         return null;
     const resolved = path.resolve(REPO_ROOT_PATH, normalized);
@@ -26379,14 +26394,15 @@ function sanitizeRelativePath(filePath) {
 function sanitizeCommitMessage(message) {
     const cleaned = message
         .replace(/[\r\n\0]+/g, " ")
-        .replace(/[`$;|&<>]/g, "")
+        .replace(/[`$;|&<>"']/g, "")
         .replace(/\s+/g, " ")
         .trim();
     const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
     return truncated || "flowai: apply changes";
 }
 function isWithinRepoPath(resolvedPath) {
-    return resolvedPath === REPO_ROOT_PATH || resolvedPath.startsWith(`${REPO_ROOT_PATH}${path.sep}`);
+    const relative = path.relative(REPO_ROOT_PATH, resolvedPath);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 // ─── Reactions ───────────────────────────────────────────────────────────────
 async function postThinkingReaction(owner, repo, payload, eventName) {

@@ -126,10 +126,10 @@ async function main() {
 
   const context = await gatherContext(owner, repo, trigger);
   const response = await agentLoop(trigger.instruction, context);
-  const commentBody = normalizeComment(response.comment);
+  let skippedPaths: string[] = [];
 
   if (response.files && response.files.length > 0) {
-    await applyFileChanges(
+    skippedPaths = await applyFileChanges(
       owner,
       repo,
       response.files,
@@ -138,6 +138,17 @@ async function main() {
       trigger.type === "assigned" ? trigger.issueNumber : undefined,
       response.comment,
     );
+  }
+
+  let commentBody = normalizeComment(response.comment);
+  if (skippedPaths.length > 0) {
+    const warning = [
+      "",
+      "---",
+      "⚠️ Skipped unsafe paths:",
+      ...skippedPaths.map(pathValue => `- ${pathValue}`),
+    ].join("\n");
+    commentBody = normalizeStringValue(`${commentBody}\n${warning}`) ?? commentBody;
   }
 
   if (trigger.type !== "assigned") {
@@ -475,7 +486,8 @@ async function applyFileChanges(
   prNumber?: number,
   issueNumber?: number,
   prComment?: string,
-) {
+): Promise<string[]> {
+  const skippedPaths: string[] = [];
   execFileSync("git", ["config", "user.name", "flowai[bot]"], { cwd: REPO_ROOT });
   execFileSync("git", ["config", "user.email", "flowai[bot]@users.noreply.github.com"], { cwd: REPO_ROOT });
 
@@ -483,6 +495,7 @@ async function applyFileChanges(
     const safePath = sanitizeRelativePath(f.path);
     if (!safePath) {
       console.log(`Skipping unsafe path: ${f.path}`);
+      skippedPaths.push(f.path);
       continue;
     }
 
@@ -506,12 +519,13 @@ async function applyFileChanges(
   }).trim();
   if (!status) {
     console.log("No file changes detected, skipping commit.");
-    return;
+    return skippedPaths;
   }
 
   const sanitizedCommitMessage = sanitizeCommitMessage(commitMessage);
   execFileSync("git", ["commit", "-m", sanitizedCommitMessage], { cwd: REPO_ROOT });
   execFileSync("git", ["push"], { cwd: REPO_ROOT });
+  return skippedPaths;
 }
 
 function sanitizeRelativePath(filePath: string): string | null {
@@ -525,6 +539,7 @@ function sanitizeRelativePath(filePath: string): string | null {
   if (normalized.startsWith("../")) return null;
 
   const segments = normalized.split("/");
+  if (segments.includes("..")) return null;
   if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment))) return null;
 
   const resolved = path.resolve(REPO_ROOT_PATH, normalized);
@@ -536,7 +551,7 @@ function sanitizeRelativePath(filePath: string): string | null {
 function sanitizeCommitMessage(message: string): string {
   const cleaned = message
     .replace(/[\r\n\0]+/g, " ")
-    .replace(/[`$;|&<>]/g, "")
+    .replace(/[`$;|&<>"']/g, "")
     .replace(/\s+/g, " ")
     .trim();
   const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
@@ -544,7 +559,8 @@ function sanitizeCommitMessage(message: string): string {
 }
 
 function isWithinRepoPath(resolvedPath: string): boolean {
-  return resolvedPath === REPO_ROOT_PATH || resolvedPath.startsWith(`${REPO_ROOT_PATH}${path.sep}`);
+  const relative = path.relative(REPO_ROOT_PATH, resolvedPath);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 // ─── Reactions ───────────────────────────────────────────────────────────────
