@@ -25930,6 +25930,8 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.shouldRequestActionableResponse = shouldRequestActionableResponse;
+exports.likelyNeedsFileChanges = likelyNeedsFileChanges;
 const rest_1 = __nccwpck_require__(6145);
 const core = __importStar(__nccwpck_require__(7484));
 const child_process_1 = __nccwpck_require__(5317);
@@ -25951,6 +25953,21 @@ const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
 const TRUNCATION_SUFFIX_LENGTH = TRUNCATION_SUFFIX.length;
 const REPO_ROOT = process.env.GITHUB_WORKSPACE ?? process.cwd();
 const REPO_ROOT_PATH = path.resolve(REPO_ROOT);
+const MAX_ACTIONABLE_RETRIES = 2;
+// Heuristic verbs that usually imply code or docs changes; kept broad but bounded by word-matching.
+const CHANGE_KEYWORD_REGEXES = Object.freeze([
+    /\badd\b/i,
+    /\bcreate\b/i,
+    /\bupdate\b/i,
+    /\bimplement\b/i,
+    /\bwrite\b/i,
+    /\bmodify\b/i,
+    /\brefactor\b/i,
+    /\bbuild\b/i,
+    /\bgenerate\b/i,
+    /\bpatch\b/i,
+    /\bcommit\b/i,
+]);
 const SYSTEM_PROMPT = [
     "You are FlowAI, a top-tier coding agent comparable to the best AI dev tools.",
     "Operate like a senior engineer: be precise, proactive, and production-ready.",
@@ -26158,12 +26175,32 @@ async function agentLoop(instruction, context) {
         },
     ];
     let lastResponse = "";
+    let actionableRetries = 0;
     for (let round = 0; round < 3; round++) {
         const raw = await callLLM(messages);
         lastResponse = raw;
         messages.push({ role: "assistant", content: raw });
-        if (!raw.includes("CONTINUE:"))
+        const shouldEvaluateActionable = actionableRetries < MAX_ACTIONABLE_RETRIES;
+        const parsed = shouldEvaluateActionable ? parseResponse(raw) : null;
+        // actionableRetries counts completed retry responses; enforce limit before queuing another attempt.
+        if (parsed && shouldEvaluateActionable && shouldRequestActionableResponse(parsed, instruction)) {
+            actionableRetries += 1;
+            messages.push({
+                role: "user",
+                content: [
+                    "Your previous reply did not include any actionable file changes even though the instruction appears to require repository updates.",
+                    "Respond again using ONLY a JSON object with the schema { comment, files, commitMessage }.",
+                    "Wrap the JSON in a ```json``` code block so it can be parsed.",
+                    "Example (wrap in a JSON code block): ```json\n{\"comment\":\"...\",\"files\":[{\"path\":\"example.txt\",\"action\":\"update\",\"content\":\"...\"}],\"commitMessage\":\"...\"}\n```",
+                    "Include full file contents for every create/update, and use files: [] only if no changes are truly needed.",
+                    "Do not describe commands—provide the resulting file contents to apply.",
+                ].join("\n"),
+            });
+            continue;
+        }
+        if (!raw.includes("CONTINUE:")) {
             break;
+        }
         messages.push({ role: "user", content: "Continue with the next step." });
     }
     let parsed = parseResponse(lastResponse);
@@ -26330,6 +26367,18 @@ function normalizeFileChanges(value) {
         });
     }
     return normalized.length > 0 ? normalized : undefined;
+}
+function shouldRequestActionableResponse(parsed, instruction) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        return false;
+    // Only treat files as actionable when they are a well-formed array; ignore malformed shapes.
+    const files = Array.isArray(parsed.files) ? parsed.files : undefined;
+    if (parsed.files !== undefined && !files)
+        return false;
+    return likelyNeedsFileChanges(instruction) && (!files || files.length === 0);
+}
+function likelyNeedsFileChanges(instruction) {
+    return CHANGE_KEYWORD_REGEXES.some(regex => regex.test(instruction));
 }
 function normalizeStringValue(value) {
     const trimmed = value.trim();
@@ -26525,7 +26574,9 @@ async function postThinkingReaction(owner, repo, payload, eventName) {
     catch { }
 }
 // ─── Run ─────────────────────────────────────────────────────────────────────
-main().catch(console.error);
+if (process.env.FLOWAI_SKIP_MAIN !== "1") {
+    main().catch(console.error);
+}
 
 
 /***/ }),
