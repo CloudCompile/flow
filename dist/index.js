@@ -26265,7 +26265,8 @@ function normalizeFileChanges(value) {
             continue;
         if (file.action !== "create" && file.action !== "update" && file.action !== "delete")
             continue;
-        if ((file.action === "create" || file.action === "update") && typeof file.content !== "string")
+        const requiresContent = file.action === "create" || file.action === "update";
+        if (requiresContent && typeof file.content !== "string")
             continue;
         normalized.push({
             path: file.path.trim(),
@@ -26361,13 +26362,20 @@ function sanitizeRelativePath(filePath) {
     if (segments.some(segment => BLOCKED_PATH_SEGMENTS.has(segment)))
         return null;
     const resolved = path.resolve(REPO_ROOT_PATH, normalized);
-    if (!(resolved === REPO_ROOT_PATH || resolved.startsWith(`${REPO_ROOT_PATH}${path.sep}`)))
+    if (!isWithinRepoPath(resolved))
         return null;
     return normalized;
 }
 function sanitizeCommitMessage(message) {
-    const cleaned = message.replace(/[\r\n]+/g, " ").trim();
-    return cleaned || "flowai: apply changes";
+    const cleaned = message
+        .replace(/[\r\n\0]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const truncated = cleaned.slice(0, 200);
+    return truncated || "flowai: apply changes";
+}
+function isWithinRepoPath(resolvedPath) {
+    return resolvedPath === REPO_ROOT_PATH || resolvedPath.startsWith(`${REPO_ROOT_PATH}${path.sep}`);
 }
 // ─── Reactions ───────────────────────────────────────────────────────────────
 async function postThinkingReaction(owner, repo, payload, eventName) {
