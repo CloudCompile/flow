@@ -11,6 +11,8 @@ const MODEL = core.getInput("model") || "glm";
 const MAX_TOKENS = parseInt(core.getInput("max_tokens") || "32000", 10);
 const MAX_COMMENT_LENGTH = 60000;
 const MAX_COMMIT_MESSAGE_LENGTH = 200;
+const MAX_CONTEXT_SNIPPET_LENGTH = 6000;
+const MAX_CONTEXT_FILES = 8;
 const DEFAULT_COMMENT_MESSAGE = "FlowAI completed this run but did not produce a comment.";
 const OBJECT_FALLBACK_MESSAGE = "[unserializable object response]";
 const TRUNCATION_SUFFIX = "\n\n[comment truncated]";
@@ -124,6 +126,9 @@ async function main() {
   }
 
   await postThinkingReaction(owner, repo, payload, eventName);
+  const progressCommentId = trigger.type !== "assigned"
+    ? await createProgressComment(owner, repo, trigger.issueNumber)
+    : undefined;
 
   const context = await gatherContext(owner, repo, trigger);
   const response = await agentLoop(trigger.instruction, context);
@@ -153,12 +158,21 @@ async function main() {
   }
 
   if (trigger.type !== "assigned") {
-    await octokit.issues.createComment({
-      owner,
-      repo,
-      issue_number: trigger.issueNumber,
-      body: commentBody,
-    });
+    if (progressCommentId) {
+      await octokit.issues.updateComment({
+        owner,
+        repo,
+        comment_id: progressCommentId,
+        body: commentBody,
+      });
+    } else {
+      await octokit.issues.createComment({
+        owner,
+        repo,
+        issue_number: trigger.issueNumber,
+        body: commentBody,
+      });
+    }
   }
 }
 
@@ -215,8 +229,14 @@ async function gatherContext(
         .join("\n\n");
 
       if (patches) parts.push(`## PR diffs\n${patches}`);
+      const changedPaths = files.map(f => f.filename);
+      const snippets = readContextSnippets(changedPaths, MAX_CONTEXT_FILES);
+      if (snippets) parts.push(`## Relevant file snippets\n${snippets}`);
     } catch {}
   }
+
+  const repoSnippets = readContextSnippets(["package.json", "tsconfig.json", "action.yml", "README.md"], 4);
+  if (repoSnippets) parts.push(`## Repository config snippets\n${repoSnippets}`);
 
   try {
     if (trigger.isPR && trigger.prNumber) {
@@ -270,7 +290,18 @@ async function agentLoop(instruction: string, context: string): Promise<BotRespo
     messages.push({ role: "user", content: "Continue with the next step." });
   }
 
-  return parseResponse(lastResponse);
+  let parsed = parseResponse(lastResponse);
+  if (isLikelyParseFailure(parsed, lastResponse)) {
+    const repaired = await repairMalformedResponse(lastResponse);
+    if (repaired) {
+      const repairedParsed = parseResponse(repaired);
+      if (!isLikelyParseFailure(repairedParsed, repaired)) {
+        parsed = repairedParsed;
+      }
+    }
+  }
+
+  return parsed;
 }
 
 // ─── STREAMING LLM ───────────────────────────────────────────────────────────
@@ -570,6 +601,75 @@ function formatPathForComment(pathValue: string): string {
 function isWithinRepoPath(resolvedPath: string): boolean {
   const relative = path.relative(REPO_ROOT_PATH, resolvedPath);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function readContextSnippets(relativePaths: string[], limit: number): string {
+  const snippets: string[] = [];
+  const seen = new Set<string>();
+
+  for (const relPath of relativePaths) {
+    if (snippets.length >= limit) break;
+    const safePath = sanitizeRelativePath(relPath);
+    if (!safePath || seen.has(safePath)) continue;
+    seen.add(safePath);
+
+    const fullPath = path.resolve(REPO_ROOT_PATH, safePath);
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) continue;
+
+    try {
+      const fileContent = fs.readFileSync(fullPath, "utf8");
+      const snippet = fileContent.length > MAX_CONTEXT_SNIPPET_LENGTH
+        ? `${fileContent.slice(0, MAX_CONTEXT_SNIPPET_LENGTH)}\n...[truncated]`
+        : fileContent;
+      snippets.push(`### ${safePath}\n\`\`\`\n${snippet}\n\`\`\``);
+    } catch {}
+  }
+
+  return snippets.join("\n\n");
+}
+
+function isLikelyParseFailure(parsed: BotResponse, raw: string): boolean {
+  return parsed.comment === raw && !parsed.files?.length && !parsed.commitMessage;
+}
+
+async function repairMalformedResponse(raw: string): Promise<string | null> {
+  const repairMessages: Message[] = [
+    {
+      role: "system",
+      content: "Convert the assistant output to valid JSON only. Keep the same intent and content.",
+    },
+    {
+      role: "user",
+      content: [
+        "Return ONLY a single valid JSON object with keys: comment, files, commitMessage.",
+        "files must be an array of { path, action, content }.",
+        "If fields are missing, infer best effort and keep files as [] when unknown.",
+        "",
+        "Assistant output to repair:",
+        raw,
+      ].join("\n"),
+    },
+  ];
+
+  try {
+    return await callLLM(repairMessages);
+  } catch {
+    return null;
+  }
+}
+
+async function createProgressComment(owner: string, repo: string, issueNumber: number): Promise<number | undefined> {
+  try {
+    const { data } = await octokit.issues.createComment({
+      owner,
+      repo,
+      issue_number: issueNumber,
+      body: "👀 FlowAI is analyzing context and preparing changes...",
+    });
+    return data.id;
+  } catch {
+    return undefined;
+  }
 }
 
 // ─── Reactions ───────────────────────────────────────────────────────────────
