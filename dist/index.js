@@ -26400,13 +26400,13 @@ function sanitizeCommitMessage(message) {
         .replace(/[\r\n\0]+/g, " ")
         .replace(/\s+/g, " ")
         .trim();
-    const safeCharsOnly = cleaned.replace(/[^a-zA-Z0-9 .,_:;!?-]/g, "");
-    const truncated = safeCharsOnly.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
+    const withoutControlChars = cleaned.replace(/[\u0000-\u001F\u007F]/g, "");
+    const truncated = withoutControlChars.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
     return truncated || "flowai: apply changes";
 }
 function formatPathForComment(pathValue) {
     const cleaned = pathValue.replace(/[\r\n]/g, "").replace(/`/g, "");
-    const escaped = cleaned.replace(/([\\*_{}\[\]()#+\-.!|>])/g, "\\$1");
+    const escaped = cleaned.replace(/([\\*_{}\[\]()#+.!|>\-])/g, "\\$1");
     return `\`${escaped}\``;
 }
 function isWithinRepoPath(resolvedPath) {
