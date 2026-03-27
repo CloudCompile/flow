@@ -363,7 +363,7 @@ function extractJsonObject(value: string): string | null {
       continue;
     }
 
-    if (char === "\\") {
+    if (char === "\\" && inString) {
       escaped = true;
       continue;
     }
@@ -412,12 +412,20 @@ function normalizeFileChanges(value: unknown): FileChange[] | undefined {
     if (typeof file.path !== "string" || !file.path.trim()) continue;
     if (file.action !== "create" && file.action !== "update" && file.action !== "delete") continue;
     const requiresContent = file.action === "create" || file.action === "update";
-    if (requiresContent && typeof file.content !== "string") continue;
+    if (requiresContent) {
+      if (typeof file.content !== "string") continue;
+      normalized.push({
+        path: file.path.trim(),
+        action: file.action,
+        content: file.content,
+      });
+      continue;
+    }
 
     normalized.push({
       path: file.path.trim(),
       action: file.action,
-      content: file.action === "delete" ? "" : (file.content as string),
+      content: "",
     });
   }
 
@@ -512,7 +520,7 @@ function sanitizeRelativePath(filePath: string): string | null {
   if (path.isAbsolute(trimmed)) return null;
   if (trimmed.includes("\0")) return null;
 
-  const normalized = path.posix.normalize(trimmed);
+  const normalized = path.normalize(trimmed).replace(/\\/g, "/");
   if (normalized === "." || normalized === "..") return null;
   if (normalized.startsWith("../")) return null;
 
@@ -528,6 +536,7 @@ function sanitizeRelativePath(filePath: string): string | null {
 function sanitizeCommitMessage(message: string): string {
   const cleaned = message
     .replace(/[\r\n\0]+/g, " ")
+    .replace(/[`$;|&<>]/g, "")
     .replace(/\s+/g, " ")
     .trim();
   const truncated = cleaned.slice(0, MAX_COMMIT_MESSAGE_LENGTH);
